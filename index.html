@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Supervisor Deep Agent Demo</title>
+  <style>
+    body { font-family: sans-serif; max-width: 980px; margin: 24px auto; }
+    textarea { width: 100%; height: 80px; }
+    pre { background: #f6f6f6; padding: 12px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h2>Supervisor Deep Agent + Qdrant Memory Demo</h2>
+
+  <label>Session ID:</label>
+  <input id="sid" value="demo-session-1" style="width: 260px;"/>
+
+  <p>
+    <button onclick="sendPreset('Mevzuata göre izin süresi nedir ve benim kaç gün iznim kaldı?')">IK senaryosu</button>
+    <button onclick="sendPreset('Şirket X için 5M TL işletme kredisi limit önerisi ve teminat yapısı çıkarır mısın?')">Kredi senaryosu</button>
+    <button onclick="sendPreset('KOBİ müşterisine uygun kampanya/teklif önerir misin?')">Kampanya senaryosu</button>
+  </p>
+
+  <textarea id="msg" placeholder="Mesaj yaz..."></textarea>
+  <button onclick="send()">Gönder</button>
+
+  <h3>Yanıt</h3>
+  <pre id="out"></pre>
+
+  <h3>Hafızalar (son 30)</h3>
+  <button onclick="loadMem()">Hafızayı yenile</button>
+  <pre id="mem"></pre>
+
+<script>
+const API = "http://localhost:8000";
+function sendPreset(t){ document.getElementById("msg").value = t; send(); }
+
+async function send(){
+  const session_id = document.getElementById("sid").value;
+  const message = document.getElementById("msg").value;
+  const r = await fetch(API + "/chat", {
+    method:"POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({session_id, message})
+  });
+  const j = await r.json();
+  document.getElementById("out").textContent = JSON.stringify(j, null, 2);
+}
+
+async function loadMem(){
+  const session_id = document.getElementById("sid").value;
+  const r = await fetch(API + "/memory/" + encodeURIComponent(session_id));
+  const j = await r.json();
+  document.getElementById("mem").textContent = JSON.stringify(j, null, 2);
+}
+</script>
+</body>
+</html>
