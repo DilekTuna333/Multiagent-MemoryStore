@@ -1,57 +1,689 @@
 <!doctype html>
-<html>
+<html lang="tr">
 <head>
   <meta charset="utf-8"/>
-  <title>Supervisor Deep Agent Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Supervisor Deep Agent + LTM Demo</title>
   <style>
-    body { font-family: sans-serif; max-width: 980px; margin: 24px auto; }
-    textarea { width: 100%; height: 80px; }
-    pre { background: #f6f6f6; padding: 12px; overflow:auto; }
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #242836;
+      --border: #2e3348;
+      --text: #e4e8f1;
+      --text-dim: #8b92a8;
+      --accent: #6c7ee1;
+      --accent2: #4fc3f7;
+      --green: #4caf50;
+      --orange: #ff9800;
+      --red: #f44336;
+      --purple: #ab47bc;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      grid-template-rows: auto 1fr;
+      height: 100vh;
+      gap: 0;
+    }
+
+    /* Header */
+    .header {
+      grid-column: 1 / -1;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .header h1 { font-size: 16px; font-weight: 600; }
+    .header .badge {
+      background: var(--accent);
+      color: white;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .session-input {
+      margin-left: auto;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .session-input label { font-size: 12px; color: var(--text-dim); }
+    .session-input input {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      width: 200px;
+    }
+
+    /* Main chat area */
+    .main {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Agent routing visualization */
+    .agent-map {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      overflow-x: auto;
+    }
+    .agent-node {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      min-width: 90px;
+    }
+    .agent-node .icon {
+      width: 44px; height: 44px;
+      border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+      border: 2px solid var(--border);
+      transition: all 0.3s;
+      font-weight: 700;
+      color: white;
+    }
+    .agent-node.active .icon {
+      border-color: var(--accent);
+      box-shadow: 0 0 12px rgba(108,126,225,0.4);
+    }
+    .agent-node .label {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-weight: 500;
+    }
+    .agent-node.active .label { color: var(--accent); font-weight: 600; }
+    .arrow {
+      color: var(--border);
+      font-size: 20px;
+      transition: color 0.3s;
+    }
+    .arrow.active { color: var(--accent); }
+
+    .sup-icon { background: linear-gradient(135deg, #6c7ee1, #ab47bc); }
+    .ik-icon { background: linear-gradient(135deg, #4caf50, #2e7d32); }
+    .kredi-icon { background: linear-gradient(135deg, #ff9800, #e65100); }
+    .kampanya-icon { background: linear-gradient(135deg, #4fc3f7, #0288d1); }
+
+    /* Planning steps */
+    .plan-panel {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      display: none;
+    }
+    .plan-panel.visible { display: block; }
+    .plan-panel h3 {
+      font-size: 12px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+    }
+    .plan-steps {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .plan-step {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      transition: all 0.3s;
+    }
+    .plan-step .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--border);
+      transition: background 0.3s;
+    }
+    .plan-step.running .dot { background: var(--orange); animation: pulse 1s infinite; }
+    .plan-step.done .dot { background: var(--green); }
+    .plan-step.error .dot { background: var(--red); }
+    .plan-step .dur { color: var(--text-dim); font-size: 10px; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    /* Chat messages */
+    .chat-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .msg {
+      max-width: 80%;
+      padding: 12px 16px;
+      border-radius: 12px;
+      font-size: 14px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: var(--accent);
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+    .msg.agent {
+      align-self: flex-start;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+    .msg .agent-tag {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-bottom: 6px;
+    }
+    .tag-ik { background: rgba(76,175,80,0.2); color: #4caf50; }
+    .tag-ticari_kredi { background: rgba(255,152,0,0.2); color: #ff9800; }
+    .tag-kampanyalar { background: rgba(79,195,247,0.2); color: #4fc3f7; }
+
+    /* Input area */
+    .input-area {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 16px 24px;
+    }
+    .preset-btns {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .preset-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .preset-btn:hover {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+    .input-row {
+      display: flex;
+      gap: 10px;
+    }
+    .input-row textarea {
+      flex: 1;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-size: 14px;
+      resize: none;
+      height: 48px;
+      font-family: inherit;
+    }
+    .input-row textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .send-btn {
+      background: var(--accent);
+      border: none;
+      color: white;
+      padding: 0 24px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Right panel - Memory */
+    .memory-panel {
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+    .mem-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+    }
+    .mem-tab {
+      padding: 10px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-dim);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+    .mem-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .mem-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+    }
+    .mem-section { margin-bottom: 16px; }
+    .mem-section h4 {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .mem-item {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin-bottom: 6px;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .mem-item .cat-badge {
+      display: inline-block;
+      font-size: 9px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 3px;
+      margin-right: 4px;
+    }
+    .cat-procedural { background: rgba(171,71,188,0.2); color: #ce93d8; }
+    .cat-episodic { background: rgba(79,195,247,0.2); color: #4fc3f7; }
+    .cat-semantic { background: rgba(255,152,0,0.2); color: #ffb74d; }
+    .mem-item .ts {
+      font-size: 10px;
+      color: var(--text-dim);
+      float: right;
+    }
+    .mem-empty {
+      color: var(--text-dim);
+      font-size: 12px;
+      text-align: center;
+      padding: 24px;
+    }
+    .refresh-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 11px;
+      cursor: pointer;
+      margin: 8px 12px;
+    }
   </style>
 </head>
 <body>
-  <h2>Supervisor Deep Agent + Qdrant Memory Demo</h2>
 
-  <label>Session ID:</label>
-  <input id="sid" value="demo-session-1" style="width: 260px;"/>
+<div class="layout">
+  <!-- Header -->
+  <div class="header">
+    <h1>Supervisor Deep Agent</h1>
+    <span class="badge">LTM Enabled</span>
+    <span class="badge" style="background: var(--green);">Streaming</span>
+    <div class="session-input">
+      <label>Session:</label>
+      <input id="sid" value="demo-session-1"/>
+    </div>
+  </div>
 
-  <p>
-    <button onclick="sendPreset('Mevzuata göre izin süresi nedir ve benim kaç gün iznim kaldı?')">IK senaryosu</button>
-    <button onclick="sendPreset('Şirket X için 5M TL işletme kredisi limit önerisi ve teminat yapısı çıkarır mısın?')">Kredi senaryosu</button>
-    <button onclick="sendPreset('KOBİ müşterisine uygun kampanya/teklif önerir misin?')">Kampanya senaryosu</button>
-  </p>
+  <!-- Main area -->
+  <div class="main">
+    <!-- Agent routing map -->
+    <div class="agent-map">
+      <div class="agent-node" id="node-supervisor">
+        <div class="icon sup-icon">S</div>
+        <span class="label">Supervisor</span>
+      </div>
+      <span class="arrow" id="arrow-plan">&rarr;</span>
+      <div class="agent-node" id="node-ik">
+        <div class="icon ik-icon">IK</div>
+        <span class="label">Insan Kaynaklari</span>
+      </div>
+      <div class="agent-node" id="node-ticari_kredi">
+        <div class="icon kredi-icon">TK</div>
+        <span class="label">Ticari Kredi</span>
+      </div>
+      <div class="agent-node" id="node-kampanyalar">
+        <div class="icon kampanya-icon">KA</div>
+        <span class="label">Kampanyalar</span>
+      </div>
+    </div>
 
-  <textarea id="msg" placeholder="Mesaj yaz..."></textarea>
-  <button onclick="send()">Gönder</button>
+    <!-- Plan steps panel -->
+    <div class="plan-panel" id="planPanel">
+      <h3>Deep Agent Pipeline</h3>
+      <div class="plan-steps" id="planSteps"></div>
+    </div>
 
-  <h3>Yanıt</h3>
-  <pre id="out"></pre>
+    <!-- Chat -->
+    <div class="chat-area" id="chatArea"></div>
 
-  <h3>Hafızalar (son 30)</h3>
-  <button onclick="loadMem()">Hafızayı yenile</button>
-  <pre id="mem"></pre>
+    <!-- Input -->
+    <div class="input-area">
+      <div class="preset-btns">
+        <button class="preset-btn" onclick="sendPreset('Mevzuata g\u00f6re izin s\u00fcresi nedir ve benim ka\u00e7 g\u00fcn iznim kald\u0131?')">IK Senaryosu</button>
+        <button class="preset-btn" onclick="sendPreset('\u015eirket X i\u00e7in 5M TL i\u015fletme kredisi limit \u00f6nerisi ve teminat yap\u0131s\u0131 \u00e7\u0131kar\u0131r m\u0131s\u0131n?')">Kredi Senaryosu</button>
+        <button class="preset-btn" onclick="sendPreset('KOB\u0130 m\u00fc\u015fterisine uygun kampanya/teklif \u00f6nerir misin?')">Kampanya Senaryosu</button>
+      </div>
+      <div class="input-row">
+        <textarea id="msg" placeholder="Mesaj&#305;n&#305;z&#305; yaz&#305;n..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
+        <button class="send-btn" id="sendBtn" onclick="send()">G&ouml;nder</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Memory panel -->
+  <div class="memory-panel">
+    <div class="mem-tabs">
+      <div class="mem-tab active" onclick="switchMemTab('ltm')">Long-Term Memory</div>
+      <div class="mem-tab" onclick="switchMemTab('stm')">K&#305;sa S&uuml;reli</div>
+    </div>
+    <button class="refresh-btn" onclick="loadMemory()">Haf&#305;zay&#305; Yenile</button>
+    <div class="mem-content" id="memContent">
+      <div class="mem-empty">Mesaj g&ouml;nderdikten sonra haf&#305;za burada g&ouml;r&uuml;necek.</div>
+    </div>
+  </div>
+</div>
 
 <script>
 const API = "http://localhost:8000";
-function sendPreset(t){ document.getElementById("msg").value = t; send(); }
+let currentMemTab = "ltm";
 
-async function send(){
-  const session_id = document.getElementById("sid").value;
-  const message = document.getElementById("msg").value;
-  const r = await fetch(API + "/chat", {
-    method:"POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({session_id, message})
-  });
-  const j = await r.json();
-  document.getElementById("out").textContent = JSON.stringify(j, null, 2);
+function switchMemTab(tab) {
+  currentMemTab = tab;
+  document.querySelectorAll('.mem-tab').forEach(t => t.classList.remove('active'));
+  event.target.classList.add('active');
+  loadMemory();
 }
 
-async function loadMem(){
-  const session_id = document.getElementById("sid").value;
-  const r = await fetch(API + "/memory/" + encodeURIComponent(session_id));
-  const j = await r.json();
-  document.getElementById("mem").textContent = JSON.stringify(j, null, 2);
+function sendPreset(t) {
+  document.getElementById("msg").value = t;
+  send();
+}
+
+function resetAgentMap() {
+  document.querySelectorAll('.agent-node').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.arrow').forEach(a => a.classList.remove('active'));
+}
+
+function activateAgent(name) {
+  resetAgentMap();
+  document.getElementById('node-supervisor').classList.add('active');
+  document.getElementById('arrow-plan').classList.add('active');
+  const node = document.getElementById('node-' + name);
+  if (node) node.classList.add('active');
+}
+
+function addMessage(text, type, agentName) {
+  const area = document.getElementById('chatArea');
+  const div = document.createElement('div');
+  div.className = 'msg ' + type;
+  if (type === 'agent' && agentName) {
+    const tag = document.createElement('div');
+    tag.className = 'agent-tag tag-' + agentName;
+    tag.textContent = agentName.replace('_', ' ');
+    div.appendChild(tag);
+  }
+  div.appendChild(document.createTextNode(text));
+  area.appendChild(div);
+  area.scrollTop = area.scrollHeight;
+}
+
+const STEP_LABELS = {
+  plan: "Planlama",
+  recall: "Hafiza Tarama",
+  route: "Yonlendirme",
+  execute: "Ajan Calistirma",
+  memorize: "Hafiza Guncelleme"
+};
+
+function updatePlanStep(step, status, detail, durationMs) {
+  const panel = document.getElementById('planPanel');
+  panel.classList.add('visible');
+  const container = document.getElementById('planSteps');
+
+  let el = document.getElementById('step-' + step);
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'step-' + step;
+    el.className = 'plan-step';
+    el.innerHTML = '<span class="dot"></span><span class="txt">' + (STEP_LABELS[step] || step) + '</span><span class="dur"></span>';
+    container.appendChild(el);
+  }
+
+  el.className = 'plan-step ' + status;
+  if (detail) el.querySelector('.txt').textContent = detail;
+  if (durationMs) {
+    el.querySelector('.dur').textContent = durationMs + 'ms';
+  }
+}
+
+async function send() {
+  const session_id = document.getElementById('sid').value;
+  const message = document.getElementById('msg').value.trim();
+  if (!message) return;
+
+  document.getElementById('sendBtn').disabled = true;
+  document.getElementById('msg').value = '';
+
+  // Reset plan panel
+  document.getElementById('planSteps').innerHTML = '';
+  document.getElementById('planPanel').classList.add('visible');
+  resetAgentMap();
+  document.getElementById('node-supervisor').classList.add('active');
+
+  addMessage(message, 'user');
+
+  try {
+    // Use SSE streaming endpoint
+    const response = await fetch(API + '/chat/stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id, message})
+    });
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (line.startsWith('data:')) {
+          try {
+            const data = JSON.parse(line.slice(5).trim());
+            handleSSEEvent(data);
+          } catch(e) {}
+        }
+      }
+    }
+
+    // Process remaining buffer
+    if (buffer.startsWith('data:')) {
+      try {
+        const data = JSON.parse(buffer.slice(5).trim());
+        handleSSEEvent(data);
+      } catch(e) {}
+    }
+
+  } catch (err) {
+    // Fallback to sync endpoint
+    try {
+      const r = await fetch(API + '/chat', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id, message})
+      });
+      const j = await r.json();
+
+      if (j.plan_steps) {
+        j.plan_steps.forEach(function(s) { updatePlanStep(s.step, s.status, s.detail, s.duration_ms); });
+      }
+      activateAgent(j.chosen_agent);
+      addMessage(j.answer, 'agent', j.chosen_agent);
+    } catch (e2) {
+      addMessage('Hata: ' + e2.message, 'agent');
+    }
+  }
+
+  document.getElementById('sendBtn').disabled = false;
+  loadMemory();
+}
+
+function handleSSEEvent(data) {
+  switch (data.event) {
+    case 'step_start':
+      updatePlanStep(data.step, 'running', data.detail);
+      break;
+    case 'step_done':
+      updatePlanStep(data.step, 'done', data.detail, data.duration_ms);
+      if (data.data && data.data.chosen_agent) {
+        activateAgent(data.data.chosen_agent);
+      }
+      break;
+    case 'complete':
+      if (data.data) {
+        activateAgent(data.data.chosen_agent);
+        addMessage(data.data.answer, 'agent', data.data.chosen_agent);
+      }
+      break;
+  }
+}
+
+async function loadMemory() {
+  const mc = document.getElementById('memContent');
+  const sid = document.getElementById('sid').value;
+
+  if (currentMemTab === 'ltm') {
+    try {
+      const r = await fetch(API + '/ltm/all/summary');
+      const j = await r.json();
+      renderLTM(j);
+    } catch(e) {
+      mc.innerHTML = '<div class="mem-empty">LTM y\u00fcklenemedi.</div>';
+    }
+  } else {
+    try {
+      const r = await fetch(API + '/memory/' + encodeURIComponent(sid));
+      const j = await r.json();
+      renderSTM(j);
+    } catch(e) {
+      mc.innerHTML = '<div class="mem-empty">Haf\u0131za y\u00fcklenemedi.</div>';
+    }
+  }
+}
+
+function renderLTM(data) {
+  const mc = document.getElementById('memContent');
+  let html = '';
+  const agentLabels = {
+    supervisor: 'Supervisor',
+    ik: 'IK Agent',
+    ticari_kredi: 'Ticari Kredi Agent',
+    kampanyalar: 'Kampanyalar Agent'
+  };
+
+  for (const [agent, categories] of Object.entries(data)) {
+    let totalItems = 0;
+    for (const items of Object.values(categories)) totalItems += items.length;
+    if (totalItems === 0) continue;
+
+    html += '<div class="mem-section"><h4>' + (agentLabels[agent] || agent) + '</h4>';
+    for (const [cat, items] of Object.entries(categories)) {
+      for (const item of items) {
+        const ts = item.ts ? new Date(item.ts * 1000).toLocaleTimeString('tr-TR') : '';
+        html += '<div class="mem-item">' +
+          '<span class="cat-badge cat-' + cat + '">' + cat.toUpperCase() + '</span>' +
+          '<span class="ts">' + ts + '</span>' +
+          '<br/>' + ((item.summary || item.text || '').substring(0, 200)) +
+        '</div>';
+      }
+    }
+    html += '</div>';
+  }
+
+  mc.innerHTML = html || '<div class="mem-empty">Hen\u00fcz LTM kayd\u0131 yok.</div>';
+}
+
+function renderSTM(data) {
+  const mc = document.getElementById('memContent');
+  let html = '';
+  const labels = {
+    shared: 'Ortak Hafiza',
+    supervisor: 'Supervisor',
+    ik: 'IK Agent',
+    ticari_kredi: 'Ticari Kredi',
+    kampanyalar: 'Kampanyalar'
+  };
+
+  for (const [key, items] of Object.entries(data)) {
+    if (!items.length) continue;
+    html += '<div class="mem-section"><h4>' + (labels[key] || key) + ' (' + items.length + ')</h4>';
+    for (const item of items.slice(0, 10)) {
+      const ts = item.ts ? new Date(item.ts * 1000).toLocaleTimeString('tr-TR') : '';
+      html += '<div class="mem-item">' +
+        '<span class="ts">' + ts + '</span>' +
+        ((item.text || '').substring(0, 200)) +
+      '</div>';
+    }
+    html += '</div>';
+  }
+
+  mc.innerHTML = html || '<div class="mem-empty">Hen\u00fcz k\u0131sa s\u00fcreli haf\u0131za yok.</div>';
 }
 </script>
 </body>
