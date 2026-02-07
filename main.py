@@ -80,6 +80,7 @@ def get_memories(session_id: str):
         "ik": memory.list_recent("ik_memory", limit=30),
         "ticari_kredi": memory.list_recent("kredi_memory", limit=30),
         "kampanyalar": memory.list_recent("kampanya_memory", limit=30),
+        "genel": memory.list_recent("genel_memory", limit=30),
     }
 
 
@@ -126,7 +127,7 @@ def search_ltm(
 @app.get("/ltm/all/summary")
 def get_all_ltm_summary():
     """Get summary of all LTM across all agents."""
-    agents = ["supervisor", "ik", "ticari_kredi", "kampanyalar"]
+    agents = ["supervisor", "ik", "ticari_kredi", "kampanyalar", "genel"]
     result = {}
     for agent in agents:
         result[agent] = ltm.list_all_for_agent(agent, limit_per_category=10)

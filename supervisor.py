@@ -27,6 +27,17 @@ from .long_term_memory import LongTermMemory, MemoryCategory
 from .agents.ik_agent import IKAgent
 from .agents.kredi_agent import TicariKrediAgent
 from .agents.kampanya_agent import KampanyalarAgent
+from .agents.genel_agent import GenelAgent
+
+# Models that require max_completion_tokens instead of max_tokens
+_NEW_TOKEN_MODELS = {"o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"}
+
+
+def _token_param(n: int) -> dict:
+    model = settings.openai_model.lower()
+    if any(model.startswith(p) for p in _NEW_TOKEN_MODELS):
+        return {"max_completion_tokens": n}
+    return {"max_tokens": n}
 
 
 @dataclass
@@ -53,9 +64,12 @@ Ajanlar:
 1. ik - İnsan Kaynakları: İzin, mazeret, rapor, personel konuları
 2. ticari_kredi - Ticari Kredi: Kredi, limit, teminat, nakit akış, DSCR, borç analizi
 3. kampanyalar - Kampanyalar: Kampanya, teklif, paket, indirim, promosyon
+4. genel - Genel Asistan: Selamlaşma, sohbet, kişisel bilgiler, sınıflandırılamayan konular
+
+Eğer mesaj açıkça bir bankacılık konusuyla ilgili değilse "genel" seç.
 
 JSON formatında yanıt ver:
-{"agent": "ik|ticari_kredi|kampanyalar", "confidence": 0.0-1.0, "reasoning": "kısa neden"}
+{"agent": "ik|ticari_kredi|kampanyalar|genel", "confidence": 0.0-1.0, "reasoning": "kısa neden"}
 """
 
 
@@ -73,6 +87,7 @@ class SupervisorDeepAgent:
             "ik": IKAgent(memory, ltm),
             "ticari_kredi": TicariKrediAgent(memory, ltm),
             "kampanyalar": KampanyalarAgent(memory, ltm),
+            "genel": GenelAgent(memory, ltm),
         }
 
         self.shared_collection = "shared_memory"
@@ -95,15 +110,15 @@ class SupervisorDeepAgent:
                     {"role": "user", "content": user_message[:1000]},
                 ],
                 temperature=0.1,
-                max_tokens=200,
+                **_token_param(200),
             )
             raw = resp.choices[0].message.content.strip()
             if "{" in raw:
                 raw = raw[raw.index("{"):raw.rindex("}") + 1]
             parsed = json.loads(raw)
-            agent = parsed.get("agent", "ticari_kredi")
+            agent = parsed.get("agent", "genel")
             if agent not in self.agents:
-                agent = "ticari_kredi"
+                agent = "genel"
             return agent, {
                 "method": "llm",
                 "confidence": parsed.get("confidence", 0.8),
@@ -120,7 +135,7 @@ class SupervisorDeepAgent:
             return "ticari_kredi", {"method": "keyword", "matched": "kredi_keywords"}
         if any(k in t for k in ["kampanya", "teklif", "paket", "indirim", "promosyon"]):
             return "kampanyalar", {"method": "keyword", "matched": "kampanya_keywords"}
-        return "ticari_kredi", {"method": "keyword", "matched": "default"}
+        return "genel", {"method": "keyword", "matched": "default_general"}
 
     # ─── STEP 2: RECALL ──────────────────────────────────────
 
