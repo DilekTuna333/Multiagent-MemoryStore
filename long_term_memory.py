@@ -18,22 +18,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
-from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
 from .config import settings
 from .embeddings import embed_text
-
-# Models that require max_completion_tokens instead of max_tokens
-_NEW_TOKEN_MODELS = {"o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"}
-
-
-def _token_param(n: int) -> dict:
-    model = settings.openai_model.lower()
-    if any(model.startswith(p) for p in _NEW_TOKEN_MODELS):
-        return {"max_completion_tokens": n}
-    return {"max_tokens": n}
+from .llm_utils import get_openai_client, chat_completion
 
 
 class MemoryCategory(str, Enum):
@@ -77,9 +67,7 @@ class LongTermMemory:
     def __init__(self):
         self.client = QdrantClient(url=settings.qdrant_url)
         self.dim = settings.embed_dim
-        self._openai: Optional[OpenAI] = None
-        if settings.openai_api_key:
-            self._openai = OpenAI(api_key=settings.openai_api_key)
+        self._openai = get_openai_client()
 
     def _collection_name(self, agent: str, category: MemoryCategory) -> str:
         return f"{settings.mem0_collection_prefix}_{agent}_{category.value}"
@@ -100,16 +88,14 @@ class LongTermMemory:
 
     def _categorize_with_llm(self, text: str) -> tuple[MemoryCategory, float, str]:
         try:
-            resp = self._openai.chat.completions.create(
-                model=settings.openai_model,
+            raw = chat_completion(
                 messages=[
                     {"role": "system", "content": CATEGORY_SYSTEM_PROMPT},
                     {"role": "user", "content": text[:2000]},
                 ],
                 temperature=0.1,
-                **_token_param(200),
+                max_tokens=200,
             )
-            raw = resp.choices[0].message.content.strip()
             # Parse JSON from response
             if "{" in raw:
                 raw = raw[raw.index("{"):raw.rindex("}") + 1]

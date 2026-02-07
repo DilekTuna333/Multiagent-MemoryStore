@@ -4,22 +4,10 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from openai import OpenAI
-
 from ..config import settings
 from ..memory_store import MemoryStore
 from ..long_term_memory import LongTermMemory, MemoryCategory
-
-# Models that require max_completion_tokens instead of max_tokens
-_NEW_TOKEN_MODELS = {"o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"}
-
-
-def _token_param(n: int) -> dict:
-    """Return the right token-limit kwarg for the configured model."""
-    model = settings.openai_model.lower()
-    if any(model.startswith(p) for p in _NEW_TOKEN_MODELS):
-        return {"max_completion_tokens": n}
-    return {"max_tokens": n}
+from ..llm_utils import get_openai_client, chat_completion
 
 
 @dataclass
@@ -39,9 +27,7 @@ class BaseAgent:
     def __init__(self, memory: MemoryStore, ltm: LongTermMemory):
         self.memory = memory
         self.ltm = ltm
-        self._openai: Optional[OpenAI] = None
-        if settings.openai_api_key:
-            self._openai = OpenAI(api_key=settings.openai_api_key)
+        self._openai = get_openai_client()
 
     # --- Short-term memory (Qdrant per-session) ---
 
@@ -94,7 +80,6 @@ class BaseAgent:
     # --- Long-term memory ---
 
     def retrieve_ltm_context(self, query: str, session_id: Optional[str] = None) -> str:
-        """Retrieve long-term memories across all categories."""
         entries = self.ltm.retrieve(
             agent=self.name,
             query=query,
@@ -110,7 +95,6 @@ class BaseAgent:
         agent_response: str,
         extra_meta: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
-        """Store conversation turn into long-term memory with auto-categorization."""
         entries = self.ltm.insert_conversation_turn(
             agent=self.name,
             session_id=session_id,
@@ -123,7 +107,6 @@ class BaseAgent:
     # --- LLM call ---
 
     def call_llm(self, user_message: str, context: str = "") -> str:
-        """Call OpenAI LLM with agent's system prompt + context. Falls back to template."""
         if not self._openai:
             return self._fallback_response(user_message)
 
@@ -133,13 +116,7 @@ class BaseAgent:
         messages.append({"role": "user", "content": user_message})
 
         try:
-            resp = self._openai.chat.completions.create(
-                model=settings.openai_model,
-                messages=messages,
-                temperature=0.7,
-                **_token_param(1024),
-            )
-            return resp.choices[0].message.content.strip()
+            return chat_completion(messages, temperature=0.7, max_tokens=1024)
         except Exception as e:
             return self._fallback_response(user_message) + f"\n(LLM hatası: {e})"
 
