@@ -25,6 +25,16 @@ from qdrant_client.http import models as qm
 from .config import settings
 from .embeddings import embed_text
 
+# Models that require max_completion_tokens instead of max_tokens
+_NEW_TOKEN_MODELS = {"o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"}
+
+
+def _token_param(n: int) -> dict:
+    model = settings.openai_model.lower()
+    if any(model.startswith(p) for p in _NEW_TOKEN_MODELS):
+        return {"max_completion_tokens": n}
+    return {"max_tokens": n}
+
 
 class MemoryCategory(str, Enum):
     PROCEDURAL = "procedural"
@@ -97,7 +107,7 @@ class LongTermMemory:
                     {"role": "user", "content": text[:2000]},
                 ],
                 temperature=0.1,
-                max_tokens=200,
+                **_token_param(200),
             )
             raw = resp.choices[0].message.content.strip()
             # Parse JSON from response

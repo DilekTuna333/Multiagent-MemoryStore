@@ -10,6 +10,17 @@ from ..config import settings
 from ..memory_store import MemoryStore
 from ..long_term_memory import LongTermMemory, MemoryCategory
 
+# Models that require max_completion_tokens instead of max_tokens
+_NEW_TOKEN_MODELS = {"o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"}
+
+
+def _token_param(n: int) -> dict:
+    """Return the right token-limit kwarg for the configured model."""
+    model = settings.openai_model.lower()
+    if any(model.startswith(p) for p in _NEW_TOKEN_MODELS):
+        return {"max_completion_tokens": n}
+    return {"max_tokens": n}
+
 
 @dataclass
 class AgentResult:
@@ -126,7 +137,7 @@ class BaseAgent:
                 model=settings.openai_model,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=1024,
+                **_token_param(1024),
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
