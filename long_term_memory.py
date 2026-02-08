@@ -278,6 +278,12 @@ class LongTermMemory:
         t = user_message.strip()
         tl = t.lower()
 
+        # Skip questions — they don't contain facts
+        _QUESTION_WORDS = {"ne", "mi", "mı", "mu", "mü", "nasıl", "kaç", "hangi", "nedir", "kimdir"}
+        words = set(re.split(r'\s+', tl.rstrip("?.!")))
+        if words & _QUESTION_WORDS or tl.rstrip().endswith("?"):
+            return []
+
         # Try LLM-based extraction first
         if self._openai:
             llm_facts = self._extract_facts_with_llm(t)
@@ -359,16 +365,16 @@ class LongTermMemory:
     def _extract_facts_with_llm(self, text: str) -> list[str]:
         """Use LLM to extract personal/semantic facts from text."""
         try:
-            prompt = """Kullanıcının mesajından kişisel bilgileri ve gerçekleri çıkar.
-Her bir bilgiyi ayrı satırda, "Kullanıcının X: Y" formatında yaz.
-Eğer kişisel bilgi yoksa boş yanıt ver.
+            prompt = """Sen bir kişisel bilgi çıkarma uzmanısın. Kullanıcının mesajından SADECE o mesajda geçen kişisel bilgileri çıkar.
 
-Örnekler:
-"adım Ali, 25 yaşındayım" → Kullanıcının adı: Ali\nKullanıcının yaşı: 25
-"kahverengi gözlerim var" → Kullanıcının göz rengi: kahverengi
-"merhaba nasılsın" → (boş)
+Kurallar:
+- Her bilgiyi ayrı satırda yaz: "Kullanıcının X: Y"
+- SADECE mesajda açıkça belirtilen bilgileri çıkar
+- Örnek veya varsayılan bilgi EKLEME
+- Soru cümlelerinden bilgi çıkarma (ör. "adım ne?" bir bilgi değildir)
+- Kişisel bilgi yoksa SADECE "YOK" yaz
 
-Sadece bilgileri listele, başka bir şey yazma."""
+Çıkarılabilecek bilgi türleri: ad, yaş, göz rengi, saç rengi, meslek, memleket, boy, kilo, aile bilgisi."""
 
             raw = chat_completion(
                 messages=[
@@ -379,9 +385,14 @@ Sadece bilgileri listele, başka bir şey yazma."""
                 max_tokens=300,
             )
             raw = raw.strip()
-            if not raw or raw == "(boş)" or len(raw) < 5:
+            if not raw or "yok" in raw.lower() or len(raw) < 5:
                 return []
-            facts = [line.strip() for line in raw.split("\n") if line.strip() and ":" in line]
+            # Filter: only lines with "Kullanıcının" prefix
+            facts = []
+            for line in raw.split("\n"):
+                line = line.strip()
+                if ":" in line and "kullanıcı" in line.lower():
+                    facts.append(line)
             return facts[:5]
         except Exception:
             return []
@@ -401,6 +412,9 @@ Sadece bilgileri listele, başka bir şey yazma."""
         Smart filtering by category:
           - SEMANTIC/EPISODIC: filter by user_id (personal data)
           - PROCEDURAL: NO user_id filter (universal knowledge)
+
+        Falls back to recency-based scroll if semantic search returns 0 results
+        (handles hash-based embedding fallback where semantic similarity doesn't work).
         """
         categories = [category] if category else list(MemoryCategory)
         all_hits: list[LTMEntry] = []
@@ -435,7 +449,7 @@ Sadece bilgileri listele, başka bir şey yazma."""
                     query_filter=qfilter,
                 )
             except Exception:
-                continue
+                res = []
 
             for r in res:
                 payload = r.payload or {}
@@ -451,8 +465,58 @@ Sadece bilgileri listele, başka bir şey yazma."""
                     timestamp=payload.get("ts", 0),
                 ))
 
+        # Fallback: if semantic search returned nothing, get most recent entries
+        # This handles hash-based embeddings where semantic similarity is zero
+        if not all_hits:
+            all_hits = self._retrieve_recent_fallback(agent, categories, user_id, limit)
+
         all_hits.sort(key=lambda x: x.score, reverse=True)
         return all_hits[:limit]
+
+    def _retrieve_recent_fallback(
+        self,
+        agent: str,
+        categories: list[MemoryCategory],
+        user_id: Optional[str],
+        limit: int,
+    ) -> list[LTMEntry]:
+        """Fallback: get most recent entries when semantic search fails."""
+        hits: list[LTMEntry] = []
+        for cat in categories:
+            col_name = self._collection_name(agent, cat)
+            try:
+                conditions = []
+                if user_id and cat in _PERSONAL_CATEGORIES:
+                    conditions.append(
+                        qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id))
+                    )
+                scroll_filter = qm.Filter(must=conditions) if conditions else None
+
+                points, _ = self.client.scroll(
+                    collection_name=col_name,
+                    limit=limit,
+                    with_payload=True,
+                    scroll_filter=scroll_filter,
+                )
+                for p in points:
+                    payload = p.payload or {}
+                    hits.append(LTMEntry(
+                        id=str(p.id),
+                        text=str(payload.get("text", "")),
+                        category=cat,
+                        agent=payload.get("agent", agent),
+                        session_id=payload.get("session_id", ""),
+                        user_id=payload.get("user_id", ""),
+                        score=0.5,  # neutral score for recency-based results
+                        metadata=dict(payload.get("meta", {})),
+                        timestamp=payload.get("ts", 0),
+                    ))
+            except Exception:
+                continue
+
+        # Sort by timestamp (most recent first)
+        hits.sort(key=lambda x: x.timestamp, reverse=True)
+        return hits[:limit]
 
     def retrieve_by_category(
         self,

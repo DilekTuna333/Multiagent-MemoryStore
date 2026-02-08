@@ -440,8 +440,8 @@
     <span class="badge" style="background: var(--green);">Streaming</span>
     <span class="badge" style="background: var(--purple);">Shared Board</span>
     <div class="header-inputs">
-      <label>User:</label>
-      <input id="uid" value="user-1" style="width:100px"/>
+      <label>User ID:</label>
+      <input id="uid" value="user-1" style="width:120px" placeholder="user-1"/>
       <label>Session:</label>
       <input id="sid" value="demo-session-1"/>
     </div>
@@ -713,10 +713,16 @@ function handleSSEEvent(data) {
 // ─── LTM Tab ─────────────────────────────────────────────
 async function loadLTM() {
   const mc = document.getElementById('memContent');
+  const uid = document.getElementById('uid').value;
   try {
-    const r = await fetch(API + '/ltm/all/summary');
-    const j = await r.json();
-    renderLTM(j);
+    // Load per-agent LTM for genel + supervisor (most relevant)
+    const agents = ['genel', 'supervisor', 'ik', 'ticari_kredi', 'kampanyalar', 'shared'];
+    const data = {};
+    for (const a of agents) {
+      const r = await fetch(API + '/ltm/' + a + (uid ? '?user_id=' + encodeURIComponent(uid) : ''));
+      data[a] = await r.json();
+    }
+    renderLTM(data);
   } catch(e) {
     mc.innerHTML = '<div class="mem-empty">LTM y\u00fcklenemedi.</div>';
   }
@@ -742,9 +748,11 @@ function renderLTM(data) {
       for (const item of items) {
         if (count >= topK) break;
         const ts = item.ts ? new Date(item.ts * 1000).toLocaleTimeString('tr-TR') : '';
+        const uid = item.user_id ? '<span class="meta-tag">user:' + escHtml(item.user_id) + '</span> ' : '';
         html += '<div class="mem-item">' +
           '<span class="cat-badge cat-' + cat + '">' + cat.toUpperCase() + '</span>' +
           '<span class="ts">' + ts + '</span>' +
+          uid +
           '<br/>' + escHtml((item.summary || item.text || '').substring(0, 200)) +
         '</div>';
         count++;

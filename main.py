@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Optional
 
 from fastapi import FastAPI
@@ -9,12 +10,29 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from .config import settings
 from .memory_store import MemoryStore
 from .long_term_memory import LongTermMemory, MemoryCategory
 from .shared_board import SharedBoard, TaskStatus
 from .supervisor import SupervisorDeepAgent
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Supervisor Deep Agent + Long-Term Memory Demo")
+
+# Startup log — show which provider is active
+if settings.use_azure:
+    logger.info("=== Azure OpenAI aktif ===")
+    logger.info("  Endpoint: %s", settings.azure_openai_endpoint)
+    logger.info("  LLM Deployment: %s", settings.azure_openai_deployment_name)
+    logger.info("  Embedding Deployment: %s", settings.azure_openai_embedding_deployment)
+    logger.info("  API Version: %s", settings.azure_openai_api_version)
+elif settings.openai_api_key:
+    logger.info("=== Standard OpenAI aktif ===")
+    logger.info("  Model: %s", settings.openai_model)
+else:
+    logger.warning("=== UYARI: Ne Azure ne OpenAI API key tanımlı! LLM çağrıları çalışmayacak. ===")
 
 app.add_middleware(
     CORSMiddleware,
