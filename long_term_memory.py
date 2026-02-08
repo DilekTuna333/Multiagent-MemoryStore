@@ -16,6 +16,7 @@ Retrieval Strategy (by category):
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -121,17 +122,35 @@ class LongTermMemory:
         t = text.lower()
 
         procedural_keywords = [
-            "adım", "süreç", "prosedür", "nasıl", "yapılır", "kural",
-            "workflow", "akış", "sıra", "onay", "giriş yap", "başvur",
-            "hesapla", "formül", "yöntem", "talimat", "step",
+            "süreç", "prosedür", "nasıl yapılır", "yapılır", "kural",
+            "workflow", "akış", "sıra ile", "onay ver", "giriş yap", "başvur",
+            "hesapla", "formül", "yöntem", "talimat", "step", "adım adım",
         ]
+
+        # Personal info patterns (Turkish morphology aware)
+        personal_patterns = [
+            "adım ", "adım,", "ismim", "benim adım", "benim ismim",
+            "yaşım", "yaşındayım", "doğdum", "doğum",
+            "gözlerim", "göz rengi", "gözüm", "saçım", "saç rengi", "boyum",
+            "kilom", "memleketim", "şehrim", "ülkem",
+            "mesleğim", "işim", "çalışıyorum",
+            "evliyim", "bekarım", "eşim", "çocuğum",
+            "numar", "adres", "mail", "e-posta",
+            "favori", "sevdiğim", "tercih",
+        ]
+
         semantic_keywords = [
             "oran", "komisyon", "limit", "tanım", "nedir", "anlamı",
             "kur", "faiz", "vade", "segment", "kategori", "tür",
             "politika", "mevzuat", "yönetmelik", "kanun",
-            "göz", "renk", "isim", "adım", "yaş", "doğum",
-            "benim", "bana", "benimki",
+            "göz", "renk", "isim", "yaş",
+            "benim", "bana", "benimki", "kahverengi", "mavi", "yeşil", "siyah",
         ]
+
+        # Check personal patterns first (strongest signal for SEMANTIC)
+        personal_score = sum(1 for p in personal_patterns if p in t)
+        if personal_score >= 1:
+            return MemoryCategory.SEMANTIC, 0.8, text[:100]
 
         proc_score = sum(1 for k in procedural_keywords if k in t)
         sem_score = sum(1 for k in semantic_keywords if k in t)
@@ -219,21 +238,153 @@ class LongTermMemory:
         )
         entries.append(entry)
 
-        # Auto-categorize and store additional memories from the content
-        combined = f"{user_message} {agent_response}"
-        cat, conf, summary = self.categorize(combined)
-        if cat != MemoryCategory.EPISODIC:
-            entry2 = self.insert(
+        # Extract personal facts from user message and store as SEMANTIC
+        personal_facts = self._extract_personal_facts(user_message)
+        for fact in personal_facts:
+            fact_entry = self.insert(
                 agent=agent,
                 session_id=session_id,
-                text=combined,
-                category=cat,
-                metadata={"type": "auto_categorized", "source_category": cat.value, **(extra_meta or {})},
+                text=fact,
+                category=MemoryCategory.SEMANTIC,
+                metadata={"type": "personal_fact", "source": "user_message", **(extra_meta or {})},
                 user_id=user_id,
             )
-            entries.append(entry2)
+            entries.append(fact_entry)
+
+        # Auto-categorize combined text for additional non-episodic storage
+        if not personal_facts:
+            combined = f"{user_message} {agent_response}"
+            cat, conf, summary = self.categorize(combined)
+            if cat != MemoryCategory.EPISODIC:
+                entry2 = self.insert(
+                    agent=agent,
+                    session_id=session_id,
+                    text=combined,
+                    category=cat,
+                    metadata={"type": "auto_categorized", "source_category": cat.value, **(extra_meta or {})},
+                    user_id=user_id,
+                )
+                entries.append(entry2)
 
         return entries
+
+    def _extract_personal_facts(self, user_message: str) -> list[str]:
+        """Extract personal facts from user message for SEMANTIC storage.
+
+        Looks for patterns like 'adım X', 'yaşım X', 'gözlerim X' etc.
+        Returns clean fact strings like 'Kullanıcının adı: Dilek Tuna'
+        """
+        facts = []
+        t = user_message.strip()
+        tl = t.lower()
+
+        # Try LLM-based extraction first
+        if self._openai:
+            llm_facts = self._extract_facts_with_llm(t)
+            if llm_facts:
+                return llm_facts
+
+        # Heuristic: pattern-based extraction
+        # Name patterns
+        name_patterns = [
+            r"(?:benim\s+)?ad[ıi]m\s+(.+?)(?:\.|,|$)",
+            r"(?:benim\s+)?ismim\s+(.+?)(?:\.|,|$)",
+            r"ben\s+(.+?)(?:\.|,|$|\s+yaş)",
+        ]
+        for pat in name_patterns:
+            m = re.search(pat, tl)
+            if m:
+                name_val = m.group(1).strip().rstrip(".,")
+                # Use original case from the message
+                orig_m = re.search(pat, t, re.IGNORECASE)
+                if orig_m:
+                    name_val = orig_m.group(1).strip().rstrip(".,")
+                if len(name_val) > 1 and len(name_val) < 60:
+                    facts.append(f"Kullanıcının adı: {name_val}")
+                break
+
+        # Age patterns
+        age_patterns = [
+            r"yaş[ıi]m\s+(\d+)",
+            r"(\d+)\s+yaş[ıi]nd",
+        ]
+        for pat in age_patterns:
+            m = re.search(pat, tl)
+            if m:
+                facts.append(f"Kullanıcının yaşı: {m.group(1)}")
+                break
+
+        # Eye color patterns — handle both "kahverengi gözlerim" and "gözlerim kahverengi"
+        _COLORS = ["kahverengi", "mavi", "yeşil", "siyah", "ela", "gri", "kestane"]
+        eye_found = False
+
+        # Pattern 1: "<color> gözlerim var" / "<color> gözlü"
+        for color in _COLORS:
+            if color in tl and ("göz" in tl):
+                facts.append(f"Kullanıcının göz rengi: {color}")
+                eye_found = True
+                break
+
+        if not eye_found:
+            # Pattern 2: "gözlerim <color>" / "göz rengim <color>"
+            eye_patterns = [
+                r"gözlerim\s+(\w+)",
+                r"göz\s+reng[im]+\s+(\w+)",
+            ]
+            for pat in eye_patterns:
+                m = re.search(pat, tl)
+                if m:
+                    color = m.group(1).strip().rstrip(".,")
+                    if color not in ("var", "ne", "nasıl", "bir"):
+                        facts.append(f"Kullanıcının göz rengi: {color}")
+                        break
+
+        # General "X var/dir" patterns for personal attributes
+        attr_patterns = [
+            (r"saçlar[ıi]m?\s+(.+?)(?:\.|,|$)", "saç rengi/tipi"),
+            (r"boyum\s+(.+?)(?:\.|,|$)", "boyu"),
+            (r"kilom\s+(.+?)(?:\.|,|$)", "kilosu"),
+            (r"mesleğim\s+(.+?)(?:\.|,|$)", "mesleği"),
+            (r"memleketim\s+(.+?)(?:\.|,|$)", "memleketi"),
+        ]
+        for pat, label in attr_patterns:
+            m = re.search(pat, tl)
+            if m:
+                val = m.group(1).strip().rstrip(".,")
+                if len(val) > 0 and len(val) < 60:
+                    facts.append(f"Kullanıcının {label}: {val}")
+
+        return facts
+
+    def _extract_facts_with_llm(self, text: str) -> list[str]:
+        """Use LLM to extract personal/semantic facts from text."""
+        try:
+            prompt = """Kullanıcının mesajından kişisel bilgileri ve gerçekleri çıkar.
+Her bir bilgiyi ayrı satırda, "Kullanıcının X: Y" formatında yaz.
+Eğer kişisel bilgi yoksa boş yanıt ver.
+
+Örnekler:
+"adım Ali, 25 yaşındayım" → Kullanıcının adı: Ali\nKullanıcının yaşı: 25
+"kahverengi gözlerim var" → Kullanıcının göz rengi: kahverengi
+"merhaba nasılsın" → (boş)
+
+Sadece bilgileri listele, başka bir şey yazma."""
+
+            raw = chat_completion(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": text[:500]},
+                ],
+                temperature=0.1,
+                max_tokens=300,
+            )
+            raw = raw.strip()
+            if not raw or raw == "(boş)" or len(raw) < 5:
+                return []
+            facts = [line.strip() for line in raw.split("\n") if line.strip() and ":" in line]
+            return facts[:5]
+        except Exception:
+            return []
 
     def retrieve(
         self,
