@@ -269,6 +269,10 @@ class SupervisorDeepAgent:
             if k in text.lower():
                 memories.append(f"Konu: {k}")
 
+        # Also extract personal facts from user message
+        personal_facts = self.ltm._extract_personal_facts(user_message)
+        memories.extend(personal_facts)
+
         out, seen = [], set()
         for x in memories:
             if x not in seen:

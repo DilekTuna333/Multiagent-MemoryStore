@@ -1,6 +1,9 @@
+import logging
 import numpy as np
 import hashlib
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Global OpenAI client cache
 _openai_client = None
@@ -38,8 +41,8 @@ def embed_text(text: str, dim: int = 384) -> list[float]:
                 dimensions=dim,
             )
             return resp.data[0].embedding
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("OpenAI embedding failed, falling back to hash: %s", e)
 
     # Fallback: deterministic hash-based (no semantic similarity)
     h = hashlib.sha256(text.encode("utf-8")).digest()

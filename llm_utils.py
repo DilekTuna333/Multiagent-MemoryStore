@@ -1,12 +1,15 @@
 """
 Shared LLM utility — resilient OpenAI chat wrapper.
 
-Handles the max_tokens vs max_completion_tokens difference automatically
-using a try/except approach that works for ALL models.
+Handles the max_tokens vs max_completion_tokens difference automatically.
+Also handles reasoning models that don't accept temperature.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 from openai import OpenAI
 
@@ -27,8 +30,19 @@ def get_openai_client() -> Optional[OpenAI]:
     return None
 
 
-# Track which token param this model needs (learned at runtime)
-_use_max_completion_tokens: Optional[bool] = None
+# Prefixes for reasoning models that reject temperature
+_REASONING_PREFIXES = ("o1", "o3", "o4")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """Check if model is a reasoning model (rejects temperature)."""
+    m = model.lower().strip()
+    # o1, o1-mini, o1-preview, o3, o3-mini, o4-mini etc.
+    # but NOT gpt-4o, gpt-4o-mini (those accept temperature)
+    for prefix in _REASONING_PREFIXES:
+        if m == prefix or m.startswith(prefix + "-"):
+            return True
+    return False
 
 
 def chat_completion(
@@ -37,50 +51,68 @@ def chat_completion(
     max_tokens: int = 1024,
     client: Optional[OpenAI] = None,
 ) -> str:
-    """Call OpenAI chat completion with automatic token-param fallback.
+    """Call OpenAI chat completion with robust parameter handling.
 
-    Tries max_completion_tokens first; if the API rejects it, retries
-    with max_tokens. Caches the working param for subsequent calls.
+    Strategy:
+      1. Detect reasoning models → skip temperature
+      2. Try max_completion_tokens first
+      3. If that fails (unsupported param), try max_tokens
+      4. If both fail, try with no token limit (last resort)
     """
-    global _use_max_completion_tokens
-
     c = client or get_openai_client()
     if c is None:
         raise RuntimeError("No OpenAI API key configured")
 
+    model = settings.openai_model
+    is_reasoning = _is_reasoning_model(model)
+
     base_kwargs: dict[str, Any] = {
-        "model": settings.openai_model,
+        "model": model,
         "messages": messages,
-        "temperature": temperature,
     }
+    # Reasoning models reject temperature
+    if not is_reasoning:
+        base_kwargs["temperature"] = temperature
 
-    # If we already know which param works, use it directly
-    if _use_max_completion_tokens is True:
-        base_kwargs["max_completion_tokens"] = max_tokens
-        resp = c.chat.completions.create(**base_kwargs)
-        return resp.choices[0].message.content.strip()
+    # Try token param variants in order
+    token_params = ["max_completion_tokens", "max_tokens"]
 
-    if _use_max_completion_tokens is False:
-        base_kwargs["max_tokens"] = max_tokens
-        resp = c.chat.completions.create(**base_kwargs)
-        return resp.choices[0].message.content.strip()
-
-    # First call — try max_completion_tokens, fall back to max_tokens
-    try:
-        resp = c.chat.completions.create(
-            **base_kwargs,
-            max_completion_tokens=max_tokens,
-        )
-        _use_max_completion_tokens = True
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        err_msg = str(e).lower()
-        if "max_tokens" in err_msg or "max_completion_tokens" in err_msg or "unsupported parameter" in err_msg:
-            # This model wants the old param
-            resp = c.chat.completions.create(
-                **base_kwargs,
-                max_tokens=max_tokens,
-            )
-            _use_max_completion_tokens = False
+    last_error = None
+    for token_param in token_params:
+        try:
+            call_kwargs = {**base_kwargs, token_param: max_tokens}
+            logger.debug("LLM call attempt: model=%s, token_param=%s, has_temperature=%s",
+                         model, token_param, "temperature" in call_kwargs)
+            resp = c.chat.completions.create(**call_kwargs)
+            logger.debug("LLM call succeeded with %s", token_param)
             return resp.choices[0].message.content.strip()
-        raise
+        except Exception as e:
+            last_error = e
+            err_msg = str(e).lower()
+            logger.warning("LLM call failed with %s: %s", token_param, str(e)[:200])
+            # Only continue to next variant if the error is about unsupported params
+            if "unsupported" in err_msg or "max_tokens" in err_msg or "max_completion_tokens" in err_msg:
+                continue
+            # If temperature was the issue, retry without it
+            if "temperature" in err_msg:
+                base_kwargs.pop("temperature", None)
+                try:
+                    call_kwargs = {**base_kwargs, token_param: max_tokens}
+                    resp = c.chat.completions.create(**call_kwargs)
+                    return resp.choices[0].message.content.strip()
+                except Exception as e2:
+                    last_error = e2
+                    continue
+            raise
+
+    # Last resort: no token limit, no temperature
+    try:
+        resp = c.chat.completions.create(model=model, messages=messages)
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        pass
+
+    # Re-raise the last meaningful error
+    if last_error:
+        raise last_error
+    raise RuntimeError("All LLM call attempts failed")
