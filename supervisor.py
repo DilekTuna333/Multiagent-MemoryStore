@@ -19,25 +19,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Optional
 
-from openai import OpenAI
-
 from .config import settings
 from .memory_store import MemoryStore
 from .long_term_memory import LongTermMemory, MemoryCategory
+from .shared_board import SharedBoard
+from .llm_utils import get_openai_client, chat_completion
 from .agents.ik_agent import IKAgent
 from .agents.kredi_agent import TicariKrediAgent
 from .agents.kampanya_agent import KampanyalarAgent
 from .agents.genel_agent import GenelAgent
-
-# Models that require max_completion_tokens instead of max_tokens
-_NEW_TOKEN_MODELS = {"o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"}
-
-
-def _token_param(n: int) -> dict:
-    model = settings.openai_model.lower()
-    if any(model.startswith(p) for p in _NEW_TOKEN_MODELS):
-        return {"max_completion_tokens": n}
-    return {"max_tokens": n}
 
 
 @dataclass
@@ -79,9 +69,8 @@ class SupervisorDeepAgent:
     def __init__(self, memory: MemoryStore, ltm: LongTermMemory):
         self.memory = memory
         self.ltm = ltm
-        self._openai: Optional[OpenAI] = None
-        if settings.openai_api_key:
-            self._openai = OpenAI(api_key=settings.openai_api_key)
+        self._openai = get_openai_client()
+        self.board = SharedBoard(memory, ltm)
 
         self.agents = {
             "ik": IKAgent(memory, ltm),
@@ -96,23 +85,20 @@ class SupervisorDeepAgent:
     # ─── STEP 1: PLAN ────────────────────────────────────────
 
     def plan(self, user_message: str) -> tuple[str, dict[str, Any]]:
-        """Decide which agent to route to. Uses LLM if available, else keywords."""
         if self._openai:
             return self._plan_with_llm(user_message)
         return self._plan_with_keywords(user_message)
 
     def _plan_with_llm(self, user_message: str) -> tuple[str, dict[str, Any]]:
         try:
-            resp = self._openai.chat.completions.create(
-                model=settings.openai_model,
+            raw = chat_completion(
                 messages=[
                     {"role": "system", "content": ROUTING_SYSTEM_PROMPT},
                     {"role": "user", "content": user_message[:1000]},
                 ],
                 temperature=0.1,
-                **_token_param(200),
+                max_tokens=200,
             )
-            raw = resp.choices[0].message.content.strip()
             if "{" in raw:
                 raw = raw[raw.index("{"):raw.rindex("}") + 1]
             parsed = json.loads(raw)
@@ -139,15 +125,16 @@ class SupervisorDeepAgent:
 
     # ─── STEP 2: RECALL ──────────────────────────────────────
 
-    def recall_memories(self, user_message: str, session_id: str, agent_name: str) -> dict[str, Any]:
-        """Retrieve memories from all layers."""
-        shared_ctx = self._retrieve_shared_context(user_message, session_id)
-        sup_ctx = self._retrieve_supervisor_context(user_message, session_id)
+    def recall_memories(self, user_message: str, session_id: str, agent_name: str,
+                        user_id: str = "") -> dict[str, Any]:
+        shared_ctx = self._retrieve_shared_context(user_message, session_id, user_id)
+        sup_ctx = self._retrieve_supervisor_context(user_message, session_id, user_id)
 
-        # Long-term memory retrieval grouped by category
+        # LTM: smart filtering — SEMANTIC/EPISODIC by user_id, PROCEDURAL open
         ltm_by_cat = self.ltm.retrieve_by_category(
             agent=agent_name,
             query=user_message,
+            user_id=user_id or None,
             limit_per_category=3,
         )
         ltm_flat = []
@@ -155,44 +142,48 @@ class SupervisorDeepAgent:
             for e in entries:
                 ltm_flat.append({"category": cat, "score": e.score, "text": e.text[:150]})
 
-        # Also retrieve supervisor-level LTM
         sup_ltm = self.ltm.retrieve(
-            agent="supervisor",
-            query=user_message,
-            limit=3,
+            agent="supervisor", query=user_message,
+            user_id=user_id or None, limit=3,
         )
 
         ltm_ctx = self.ltm.format_context(
             [e for entries in ltm_by_cat.values() for e in entries] + sup_ltm
         )
 
+        # Shared board context
+        board_ctx = self.board.get_board_context(session_id, agent_name, user_message, top_k=3)
+
         return {
             "shared_ctx": shared_ctx,
             "supervisor_ctx": sup_ctx,
             "ltm_ctx": ltm_ctx,
+            "board_ctx": board_ctx,
             "ltm_details": ltm_flat,
         }
 
-    def _retrieve_shared_context(self, user_message: str, session_id: str) -> str:
+    def _retrieve_shared_context(self, user_message: str, session_id: str,
+                                 user_id: str = "") -> str:
+        filter_meta: dict[str, Any] = {"session_id": session_id}
+        if user_id:
+            filter_meta["user_id"] = user_id
         hits = self.memory.search(
-            self.shared_collection,
-            query=user_message,
-            limit=5,
-            score_threshold=0.2,
-            filter_meta={"session_id": session_id},
+            self.shared_collection, query=user_message, limit=5,
+            score_threshold=0.2, filter_meta=filter_meta,
         )
         if not hits:
             return ""
         lines = [f"- ({h.score:.2f}) {h.text}" for h in hits]
         return "Ortak hafızadan ilgili anılar:\n" + "\n".join(lines)
 
-    def _retrieve_supervisor_context(self, user_message: str, session_id: str) -> str:
+    def _retrieve_supervisor_context(self, user_message: str, session_id: str,
+                                     user_id: str = "") -> str:
+        filter_meta: dict[str, Any] = {"session_id": session_id}
+        if user_id:
+            filter_meta["user_id"] = user_id
         hits = self.memory.search(
-            self.supervisor_collection,
-            query=user_message,
-            limit=5,
-            score_threshold=0.2,
-            filter_meta={"session_id": session_id},
+            self.supervisor_collection, query=user_message, limit=5,
+            score_threshold=0.2, filter_meta=filter_meta,
         )
         if not hits:
             return ""
@@ -201,11 +192,11 @@ class SupervisorDeepAgent:
 
     # ─── STEP 3: EXECUTE ─────────────────────────────────────
 
-    def execute_agent(self, agent_name: str, user_message: str, session_id: str, context: str) -> dict[str, Any]:
-        """Augment message with context and execute agent."""
+    def execute_agent(self, agent_name: str, user_message: str, session_id: str,
+                      context: str, user_id: str = "") -> dict[str, Any]:
         routed_message = f"{context}\n\n{user_message}".strip() if context else user_message
         agent = self.agents[agent_name]
-        result = agent.run(user_message=routed_message, session_id=session_id)
+        result = agent.run(user_message=routed_message, session_id=session_id, user_id=user_id)
         return {
             "answer": result.answer,
             "notes": result.notes,
@@ -214,40 +205,37 @@ class SupervisorDeepAgent:
 
     # ─── STEP 4: MEMORIZE ────────────────────────────────────
 
-    def memorize(self, session_id: str, agent_name: str, user_message: str, answer: str) -> list[dict[str, Any]]:
-        """Store memories at supervisor level."""
-        # Short-term audit
+    def memorize(self, session_id: str, agent_name: str, user_message: str, answer: str,
+                 user_id: str = "") -> list[dict[str, Any]]:
         self._write_routing_audit(session_id, user_message, agent_name)
 
-        # Short-term shared + supervisor
         summary = self._summarize_turn(user_message, answer)
         extracted = self._extract_facts(user_message, answer)
 
+        base_meta = {"session_id": session_id, "agent": agent_name}
+        if user_id:
+            base_meta["user_id"] = user_id
+
         self.memory.upsert_text(
-            self.shared_collection,
-            text=f"SUMMARY: {summary}",
-            meta={"session_id": session_id, "type": "summary", "agent": agent_name},
+            self.shared_collection, text=f"SUMMARY: {summary}",
+            meta={**base_meta, "type": "summary"},
         )
         self.memory.upsert_text(
-            self.supervisor_collection,
-            text=f"SUMMARY: {summary}",
-            meta={"session_id": session_id, "type": "summary", "agent": agent_name},
+            self.supervisor_collection, text=f"SUMMARY: {summary}",
+            meta={**base_meta, "type": "summary"},
         )
 
         for mem in extracted:
             self.memory.upsert_text(
-                self.shared_collection,
-                text=f"MEM: {mem}",
-                meta={"session_id": session_id, "type": "fact", "agent": agent_name},
+                self.shared_collection, text=f"MEM: {mem}",
+                meta={**base_meta, "type": "fact"},
             )
 
-        # Long-term memory for supervisor
         sup_entries = self.ltm.insert_conversation_turn(
-            agent="supervisor",
-            session_id=session_id,
-            user_message=user_message,
-            agent_response=answer,
+            agent="supervisor", session_id=session_id,
+            user_message=user_message, agent_response=answer,
             extra_meta={"routed_to": agent_name},
+            user_id=user_id,
         )
 
         return [{"id": e.id, "category": e.category.value} for e in sup_entries]
@@ -290,16 +278,14 @@ class SupervisorDeepAgent:
 
     # ─── MAIN HANDLE (sync) ──────────────────────────────────
 
-    def handle(self, session_id: str, user_message: str) -> SupervisorResponse:
-        """Synchronous handler that returns the full response."""
+    def handle(self, session_id: str, user_message: str, user_id: str = "") -> SupervisorResponse:
         steps: list[dict[str, Any]] = []
 
         # Step 1: Plan
         t0 = time.time()
         chosen, plan_info = self.plan(user_message)
         steps.append({
-            "step": "plan",
-            "status": "done",
+            "step": "plan", "status": "done",
             "detail": f"Ajan seçildi: {chosen}",
             "data": plan_info,
             "duration_ms": int((time.time() - t0) * 1000),
@@ -307,10 +293,9 @@ class SupervisorDeepAgent:
 
         # Step 2: Recall
         t0 = time.time()
-        memories = self.recall_memories(user_message, session_id, chosen)
+        memories = self.recall_memories(user_message, session_id, chosen, user_id)
         steps.append({
-            "step": "recall",
-            "status": "done",
+            "step": "recall", "status": "done",
             "detail": f"Hafıza taraması tamamlandı (LTM: {len(memories['ltm_details'])} kayıt)",
             "data": {"ltm_count": len(memories["ltm_details"]), "ltm_details": memories["ltm_details"]},
             "duration_ms": int((time.time() - t0) * 1000),
@@ -322,11 +307,11 @@ class SupervisorDeepAgent:
             memories["shared_ctx"],
             memories["supervisor_ctx"],
             memories["ltm_ctx"],
+            memories["board_ctx"],
         ]))
-        exec_result = self.execute_agent(chosen, user_message, session_id, context)
+        exec_result = self.execute_agent(chosen, user_message, session_id, context, user_id)
         steps.append({
-            "step": "execute",
-            "status": "done",
+            "step": "execute", "status": "done",
             "detail": f"{chosen} ajanı yanıt üretti",
             "data": {"agent": chosen},
             "duration_ms": int((time.time() - t0) * 1000),
@@ -334,10 +319,9 @@ class SupervisorDeepAgent:
 
         # Step 4: Memorize
         t0 = time.time()
-        sup_ltm = self.memorize(session_id, chosen, user_message, exec_result["answer"])
+        sup_ltm = self.memorize(session_id, chosen, user_message, exec_result["answer"], user_id)
         steps.append({
-            "step": "memorize",
-            "status": "done",
+            "step": "memorize", "status": "done",
             "detail": f"Hafıza güncellendi ({len(sup_ltm)} LTM kaydı)",
             "data": {"supervisor_ltm": sup_ltm, "agent_ltm": exec_result.get("ltm_entries", [])},
             "duration_ms": int((time.time() - t0) * 1000),
@@ -350,6 +334,7 @@ class SupervisorDeepAgent:
                 "shared_ctx_present": bool(memories["shared_ctx"]),
                 "supervisor_ctx_present": bool(memories["supervisor_ctx"]),
                 "ltm_ctx_present": bool(memories["ltm_ctx"]),
+                "board_ctx_present": bool(memories.get("board_ctx")),
                 "plan_method": plan_info.get("method", "unknown"),
             },
             plan_steps=steps,
@@ -358,16 +343,14 @@ class SupervisorDeepAgent:
 
     # ─── STREAMING HANDLE (async generator for SSE) ──────────
 
-    async def handle_stream(self, session_id: str, user_message: str) -> AsyncGenerator[dict[str, Any], None]:
-        """Async generator that yields step-by-step events for SSE streaming."""
-
+    async def handle_stream(self, session_id: str, user_message: str,
+                            user_id: str = "") -> AsyncGenerator[dict[str, Any], None]:
         # Step 1: Plan
         yield {"event": "step_start", "step": "plan", "detail": "Kullanıcı mesajı analiz ediliyor..."}
         t0 = time.time()
         chosen, plan_info = self.plan(user_message)
         yield {
-            "event": "step_done",
-            "step": "plan",
+            "event": "step_done", "step": "plan",
             "detail": f"Ajan seçildi: {chosen}",
             "data": {**plan_info, "chosen_agent": chosen},
             "duration_ms": int((time.time() - t0) * 1000),
@@ -376,24 +359,23 @@ class SupervisorDeepAgent:
         # Step 2: Recall
         yield {"event": "step_start", "step": "recall", "detail": "Uzun süreli hafıza taranıyor..."}
         t0 = time.time()
-        memories = self.recall_memories(user_message, session_id, chosen)
+        memories = self.recall_memories(user_message, session_id, chosen, user_id)
         yield {
-            "event": "step_done",
-            "step": "recall",
+            "event": "step_done", "step": "recall",
             "detail": f"Hafıza taraması tamamlandı ({len(memories['ltm_details'])} LTM kaydı bulundu)",
             "data": {
                 "ltm_count": len(memories["ltm_details"]),
                 "ltm_details": memories["ltm_details"],
                 "has_shared": bool(memories["shared_ctx"]),
                 "has_supervisor": bool(memories["supervisor_ctx"]),
+                "has_board": bool(memories.get("board_ctx")),
             },
             "duration_ms": int((time.time() - t0) * 1000),
         }
 
         # Step 3: Route
         yield {
-            "event": "step_start",
-            "step": "route",
+            "event": "step_start", "step": "route",
             "detail": f"Mesaj {chosen} ajanına yönlendiriliyor...",
         }
 
@@ -404,11 +386,11 @@ class SupervisorDeepAgent:
             memories["shared_ctx"],
             memories["supervisor_ctx"],
             memories["ltm_ctx"],
+            memories.get("board_ctx", ""),
         ]))
-        exec_result = self.execute_agent(chosen, user_message, session_id, context)
+        exec_result = self.execute_agent(chosen, user_message, session_id, context, user_id)
         yield {
-            "event": "step_done",
-            "step": "execute",
+            "event": "step_done", "step": "execute",
             "detail": f"{chosen} ajanı yanıt üretti",
             "data": {"agent": chosen, "answer_preview": exec_result["answer"][:100]},
             "duration_ms": int((time.time() - t0) * 1000),
@@ -417,10 +399,9 @@ class SupervisorDeepAgent:
         # Step 5: Memorize
         yield {"event": "step_start", "step": "memorize", "detail": "Hafıza güncelleniyor..."}
         t0 = time.time()
-        sup_ltm = self.memorize(session_id, chosen, user_message, exec_result["answer"])
+        sup_ltm = self.memorize(session_id, chosen, user_message, exec_result["answer"], user_id)
         yield {
-            "event": "step_done",
-            "step": "memorize",
+            "event": "step_done", "step": "memorize",
             "detail": f"Hafıza güncellendi ({len(sup_ltm)} yeni LTM kaydı)",
             "data": {
                 "supervisor_ltm": sup_ltm,
@@ -440,6 +421,7 @@ class SupervisorDeepAgent:
                     "shared_ctx_present": bool(memories["shared_ctx"]),
                     "supervisor_ctx_present": bool(memories["supervisor_ctx"]),
                     "ltm_ctx_present": bool(memories["ltm_ctx"]),
+                    "board_ctx_present": bool(memories.get("board_ctx")),
                     "plan_method": plan_info.get("method", "unknown"),
                 },
             },

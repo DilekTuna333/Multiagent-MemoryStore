@@ -22,10 +22,10 @@ class KampanyalarAgent(BaseAgent):
             "3) KOBİ paket: EFT/havale ücretsiz + çek karnesi avantajı"
         )
 
-    def run(self, user_message: str, session_id: str) -> AgentResult:
-        shared_ctx = self.retrieve_shared_context(user_message, session_id)
-        priv_ctx = self.retrieve_private_context(user_message, session_id)
-        ltm_ctx = self.retrieve_ltm_context(user_message)
+    def run(self, user_message: str, session_id: str, user_id: str = "") -> AgentResult:
+        shared_ctx = self.retrieve_shared_context(user_message, session_id, user_id)
+        priv_ctx = self.retrieve_private_context(user_message, session_id, user_id)
+        ltm_ctx = self.retrieve_ltm_context(user_message, user_id)
 
         context = "\n\n".join(filter(None, [shared_ctx, priv_ctx, ltm_ctx]))
         answer = self.call_llm(user_message, context)
@@ -34,6 +34,7 @@ class KampanyalarAgent(BaseAgent):
         self.write_private_memory(
             session_id,
             f"TURN: {user_message[:200]} | ANSWER: {answer[:220]}",
+            user_id=user_id,
             meta={"type": "turn"},
         )
 
@@ -43,10 +44,10 @@ class KampanyalarAgent(BaseAgent):
             "intent": "suggest_offers",
             "segment_hint": "kobi" if "kobi" in user_message.lower() else None,
         }
-        self.write_structured_fact(session_id, fact, meta={"source": "rule_based"})
+        self.write_structured_fact(session_id, fact, user_id=user_id, meta={"source": "rule_based"})
 
         # Long-term memory
-        ltm_entries = self.store_to_ltm(session_id, user_message, answer)
+        ltm_entries = self.store_to_ltm(session_id, user_message, answer, user_id=user_id)
 
         return AgentResult(
             agent_name=self.name,

@@ -11,6 +11,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from .memory_store import MemoryStore
 from .long_term_memory import LongTermMemory, MemoryCategory
+from .shared_board import SharedBoard, TaskStatus
 from .supervisor import SupervisorDeepAgent
 
 app = FastAPI(title="Supervisor Deep Agent + Long-Term Memory Demo")
@@ -26,11 +27,13 @@ app.add_middleware(
 memory = MemoryStore()
 ltm = LongTermMemory()
 supervisor = SupervisorDeepAgent(memory, ltm)
+board = supervisor.board
 
 
 class ChatIn(BaseModel):
     session_id: str
     message: str
+    user_id: str = ""
 
 
 @app.get("/health")
@@ -42,9 +45,14 @@ def health():
 
 @app.post("/chat")
 def chat(payload: ChatIn):
-    resp = supervisor.handle(session_id=payload.session_id, user_message=payload.message)
+    resp = supervisor.handle(
+        session_id=payload.session_id,
+        user_message=payload.message,
+        user_id=payload.user_id,
+    )
     return {
         "session_id": payload.session_id,
+        "user_id": payload.user_id,
         "chosen_agent": resp.chosen_agent,
         "answer": resp.answer,
         "debug": resp.debug,
@@ -61,6 +69,7 @@ async def chat_stream(payload: ChatIn):
         async for event in supervisor.handle_stream(
             session_id=payload.session_id,
             user_message=payload.message,
+            user_id=payload.user_id,
         ):
             yield {
                 "event": event.get("event", "message"),
@@ -87,9 +96,8 @@ def get_memories(session_id: str):
 # ─── Long-term memory endpoints ─────────────────────────────
 
 @app.get("/ltm/{agent}")
-def get_ltm(agent: str):
-    """Get all long-term memories for an agent grouped by category."""
-    return ltm.list_all_for_agent(agent, limit_per_category=20)
+def get_ltm(agent: str, user_id: Optional[str] = None):
+    return ltm.list_all_for_agent(agent, limit_per_category=20, user_id=user_id)
 
 
 @app.get("/ltm/{agent}/search")
@@ -98,15 +106,16 @@ def search_ltm(
     q: str,
     category: Optional[str] = None,
     session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
     limit: int = 10,
 ):
-    """Search long-term memories by query with optional category filter."""
     cat = MemoryCategory(category) if category else None
     entries = ltm.retrieve(
         agent=agent,
         query=q,
         category=cat,
         session_id=session_id,
+        user_id=user_id,
         limit=limit,
     )
     return [
@@ -126,9 +135,108 @@ def search_ltm(
 
 @app.get("/ltm/all/summary")
 def get_all_ltm_summary():
-    """Get summary of all LTM across all agents."""
-    agents = ["supervisor", "ik", "ticari_kredi", "kampanyalar", "genel"]
+    agents = ["supervisor", "ik", "ticari_kredi", "kampanyalar", "genel", "shared"]
     result = {}
     for agent in agents:
         result[agent] = ltm.list_all_for_agent(agent, limit_per_category=10)
     return result
+
+
+# ─── Shared Board endpoints ──────────────────────────────────
+
+class TaskIn(BaseModel):
+    session_id: str
+    description: str
+    assigned_to: str
+    created_by: str = "supervisor"
+    priority: int = 1
+
+
+class TaskUpdateIn(BaseModel):
+    task_id: str
+    status: str  # pending, in_progress, done, failed
+    result: str = ""
+    session_id: str = ""
+
+
+class AnnounceIn(BaseModel):
+    session_id: str
+    message: str
+    created_by: str = "supervisor"
+    target_agents: list[str] = []
+
+
+class SharedFactIn(BaseModel):
+    session_id: str
+    text: str
+    written_by: str
+    category: Optional[str] = None
+
+
+@app.post("/board/task")
+def create_board_task(payload: TaskIn):
+    task = board.create_task(
+        session_id=payload.session_id,
+        description=payload.description,
+        assigned_to=payload.assigned_to,
+        created_by=payload.created_by,
+        priority=payload.priority,
+    )
+    return {"task_id": task.id, "status": task.status.value}
+
+
+@app.post("/board/task/update")
+def update_board_task(payload: TaskUpdateIn):
+    board.update_task_status(
+        task_id=payload.task_id,
+        status=TaskStatus(payload.status),
+        result=payload.result,
+        session_id=payload.session_id,
+    )
+    return {"ok": True}
+
+
+@app.get("/board/tasks/{session_id}")
+def get_board_tasks(session_id: str):
+    return board.get_all_tasks(session_id)
+
+
+@app.get("/board/tasks/{session_id}/{agent_name}")
+def get_agent_tasks(session_id: str, agent_name: str):
+    return board.get_tasks_for_agent(agent_name, session_id)
+
+
+@app.post("/board/announce")
+def create_announcement(payload: AnnounceIn):
+    ann = board.announce(
+        session_id=payload.session_id,
+        message=payload.message,
+        created_by=payload.created_by,
+        target_agents=payload.target_agents or None,
+    )
+    return {"ann_id": ann.id}
+
+
+@app.get("/board/announcements/{session_id}")
+def get_announcements(session_id: str, agent: Optional[str] = None):
+    return board.get_announcements(session_id, agent)
+
+
+@app.post("/board/fact")
+def write_shared_fact(payload: SharedFactIn):
+    cat = MemoryCategory(payload.category) if payload.category else None
+    result = board.write_shared_fact(
+        session_id=payload.session_id,
+        text=payload.text,
+        written_by=payload.written_by,
+        category=cat,
+    )
+    return result
+
+
+@app.get("/board/facts")
+def get_shared_facts(q: Optional[str] = None, category: Optional[str] = None, top_k: int = 5):
+    if q:
+        cat = MemoryCategory(category) if category else None
+        return board.search_shared_facts(q, category=cat, top_k=top_k)
+    return board.get_all_shared_facts()
