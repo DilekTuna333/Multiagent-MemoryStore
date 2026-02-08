@@ -125,13 +125,16 @@ class SupervisorDeepAgent:
 
     # ─── STEP 2: RECALL ──────────────────────────────────────
 
-    def recall_memories(self, user_message: str, session_id: str, agent_name: str) -> dict[str, Any]:
-        shared_ctx = self._retrieve_shared_context(user_message, session_id)
-        sup_ctx = self._retrieve_supervisor_context(user_message, session_id)
+    def recall_memories(self, user_message: str, session_id: str, agent_name: str,
+                        user_id: str = "") -> dict[str, Any]:
+        shared_ctx = self._retrieve_shared_context(user_message, session_id, user_id)
+        sup_ctx = self._retrieve_supervisor_context(user_message, session_id, user_id)
 
+        # LTM: smart filtering — SEMANTIC/EPISODIC by user_id, PROCEDURAL open
         ltm_by_cat = self.ltm.retrieve_by_category(
             agent=agent_name,
             query=user_message,
+            user_id=user_id or None,
             limit_per_category=3,
         )
         ltm_flat = []
@@ -139,7 +142,10 @@ class SupervisorDeepAgent:
             for e in entries:
                 ltm_flat.append({"category": cat, "score": e.score, "text": e.text[:150]})
 
-        sup_ltm = self.ltm.retrieve(agent="supervisor", query=user_message, limit=3)
+        sup_ltm = self.ltm.retrieve(
+            agent="supervisor", query=user_message,
+            user_id=user_id or None, limit=3,
+        )
 
         ltm_ctx = self.ltm.format_context(
             [e for entries in ltm_by_cat.values() for e in entries] + sup_ltm
@@ -156,20 +162,28 @@ class SupervisorDeepAgent:
             "ltm_details": ltm_flat,
         }
 
-    def _retrieve_shared_context(self, user_message: str, session_id: str) -> str:
+    def _retrieve_shared_context(self, user_message: str, session_id: str,
+                                 user_id: str = "") -> str:
+        filter_meta: dict[str, Any] = {"session_id": session_id}
+        if user_id:
+            filter_meta["user_id"] = user_id
         hits = self.memory.search(
             self.shared_collection, query=user_message, limit=5,
-            score_threshold=0.2, filter_meta={"session_id": session_id},
+            score_threshold=0.2, filter_meta=filter_meta,
         )
         if not hits:
             return ""
         lines = [f"- ({h.score:.2f}) {h.text}" for h in hits]
         return "Ortak hafızadan ilgili anılar:\n" + "\n".join(lines)
 
-    def _retrieve_supervisor_context(self, user_message: str, session_id: str) -> str:
+    def _retrieve_supervisor_context(self, user_message: str, session_id: str,
+                                     user_id: str = "") -> str:
+        filter_meta: dict[str, Any] = {"session_id": session_id}
+        if user_id:
+            filter_meta["user_id"] = user_id
         hits = self.memory.search(
             self.supervisor_collection, query=user_message, limit=5,
-            score_threshold=0.2, filter_meta={"session_id": session_id},
+            score_threshold=0.2, filter_meta=filter_meta,
         )
         if not hits:
             return ""
@@ -178,10 +192,11 @@ class SupervisorDeepAgent:
 
     # ─── STEP 3: EXECUTE ─────────────────────────────────────
 
-    def execute_agent(self, agent_name: str, user_message: str, session_id: str, context: str) -> dict[str, Any]:
+    def execute_agent(self, agent_name: str, user_message: str, session_id: str,
+                      context: str, user_id: str = "") -> dict[str, Any]:
         routed_message = f"{context}\n\n{user_message}".strip() if context else user_message
         agent = self.agents[agent_name]
-        result = agent.run(user_message=routed_message, session_id=session_id)
+        result = agent.run(user_message=routed_message, session_id=session_id, user_id=user_id)
         return {
             "answer": result.answer,
             "notes": result.notes,
@@ -219,7 +234,8 @@ class SupervisorDeepAgent:
         sup_entries = self.ltm.insert_conversation_turn(
             agent="supervisor", session_id=session_id,
             user_message=user_message, agent_response=answer,
-            extra_meta={"routed_to": agent_name, "user_id": user_id},
+            extra_meta={"routed_to": agent_name},
+            user_id=user_id,
         )
 
         return [{"id": e.id, "category": e.category.value} for e in sup_entries]
@@ -277,7 +293,7 @@ class SupervisorDeepAgent:
 
         # Step 2: Recall
         t0 = time.time()
-        memories = self.recall_memories(user_message, session_id, chosen)
+        memories = self.recall_memories(user_message, session_id, chosen, user_id)
         steps.append({
             "step": "recall", "status": "done",
             "detail": f"Hafıza taraması tamamlandı (LTM: {len(memories['ltm_details'])} kayıt)",
@@ -293,7 +309,7 @@ class SupervisorDeepAgent:
             memories["ltm_ctx"],
             memories["board_ctx"],
         ]))
-        exec_result = self.execute_agent(chosen, user_message, session_id, context)
+        exec_result = self.execute_agent(chosen, user_message, session_id, context, user_id)
         steps.append({
             "step": "execute", "status": "done",
             "detail": f"{chosen} ajanı yanıt üretti",
@@ -343,7 +359,7 @@ class SupervisorDeepAgent:
         # Step 2: Recall
         yield {"event": "step_start", "step": "recall", "detail": "Uzun süreli hafıza taranıyor..."}
         t0 = time.time()
-        memories = self.recall_memories(user_message, session_id, chosen)
+        memories = self.recall_memories(user_message, session_id, chosen, user_id)
         yield {
             "event": "step_done", "step": "recall",
             "detail": f"Hafıza taraması tamamlandı ({len(memories['ltm_details'])} LTM kaydı bulundu)",
@@ -372,7 +388,7 @@ class SupervisorDeepAgent:
             memories["ltm_ctx"],
             memories.get("board_ctx", ""),
         ]))
-        exec_result = self.execute_agent(chosen, user_message, session_id, context)
+        exec_result = self.execute_agent(chosen, user_message, session_id, context, user_id)
         yield {
             "event": "step_done", "step": "execute",
             "detail": f"{chosen} ajanı yanıt üretti",

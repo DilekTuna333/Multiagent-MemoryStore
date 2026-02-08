@@ -96,8 +96,8 @@ def get_memories(session_id: str):
 # ─── Long-term memory endpoints ─────────────────────────────
 
 @app.get("/ltm/{agent}")
-def get_ltm(agent: str):
-    return ltm.list_all_for_agent(agent, limit_per_category=20)
+def get_ltm(agent: str, user_id: Optional[str] = None):
+    return ltm.list_all_for_agent(agent, limit_per_category=20, user_id=user_id)
 
 
 @app.get("/ltm/{agent}/search")
@@ -106,6 +106,7 @@ def search_ltm(
     q: str,
     category: Optional[str] = None,
     session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
     limit: int = 10,
 ):
     cat = MemoryCategory(category) if category else None
@@ -114,6 +115,7 @@ def search_ltm(
         query=q,
         category=cat,
         session_id=session_id,
+        user_id=user_id,
         limit=limit,
     )
     return [

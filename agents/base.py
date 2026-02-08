@@ -31,59 +31,79 @@ class BaseAgent:
 
     # --- Short-term memory (Qdrant per-session) ---
 
-    def retrieve_private_context(self, user_message: str, session_id: str) -> str:
+    def retrieve_private_context(
+        self, user_message: str, session_id: str, user_id: str = ""
+    ) -> str:
+        filter_meta: dict[str, Any] = {"session_id": session_id}
+        if user_id:
+            filter_meta["user_id"] = user_id
         hits = self.memory.search(
             self.memory_collection,
             query=user_message,
             limit=5,
             score_threshold=0.2,
-            filter_meta={"session_id": session_id},
+            filter_meta=filter_meta,
         )
         if not hits:
             return ""
         lines = [f"- ({h.score:.2f}) {h.text}" for h in hits]
         return "Ajan kısa süreli hafızası:\n" + "\n".join(lines)
 
-    def retrieve_shared_context(self, user_message: str, session_id: str) -> str:
+    def retrieve_shared_context(
+        self, user_message: str, session_id: str, user_id: str = ""
+    ) -> str:
+        filter_meta: dict[str, Any] = {"session_id": session_id}
+        if user_id:
+            filter_meta["user_id"] = user_id
         hits = self.memory.search(
             self.shared_collection,
             query=user_message,
             limit=5,
             score_threshold=0.2,
-            filter_meta={"session_id": session_id},
+            filter_meta=filter_meta,
         )
         if not hits:
             return ""
         lines = [f"- ({h.score:.2f}) {h.text}" for h in hits]
         return "Ortak hafızadan:\n" + "\n".join(lines)
 
-    def write_private_memory(self, session_id: str, text: str, meta: dict[str, Any] | None = None):
-        self.memory.upsert_text(
-            self.memory_collection,
-            text=text,
-            meta={"session_id": session_id, **(meta or {})},
-        )
+    def write_private_memory(
+        self, session_id: str, text: str, user_id: str = "",
+        meta: dict[str, Any] | None = None,
+    ):
+        base = {"session_id": session_id, **(meta or {})}
+        if user_id:
+            base["user_id"] = user_id
+        self.memory.upsert_text(self.memory_collection, text=text, meta=base)
 
-    def write_structured_fact(self, session_id: str, fact: dict, meta: dict[str, Any] | None = None):
+    def write_structured_fact(
+        self, session_id: str, fact: dict, user_id: str = "",
+        meta: dict[str, Any] | None = None,
+    ):
         text = "FACT_JSON: " + json.dumps(fact, ensure_ascii=False)
-        self.memory.upsert_text(
-            self.memory_collection,
-            text=text,
-            meta={
-                "session_id": session_id,
-                "type": "fact_structured",
-                "fact": fact,
-                **(meta or {}),
-            },
-        )
+        base = {
+            "session_id": session_id,
+            "type": "fact_structured",
+            "fact": fact,
+            **(meta or {}),
+        }
+        if user_id:
+            base["user_id"] = user_id
+        self.memory.upsert_text(self.memory_collection, text=text, meta=base)
 
     # --- Long-term memory ---
 
-    def retrieve_ltm_context(self, query: str, session_id: Optional[str] = None) -> str:
+    def retrieve_ltm_context(self, query: str, user_id: str = "") -> str:
+        """Retrieve LTM with smart user_id filtering.
+
+        SEMANTIC/EPISODIC → filtered by user_id (personal data).
+        PROCEDURAL → no user_id filter (universal knowledge).
+        """
         entries = self.ltm.retrieve(
             agent=self.name,
             query=query,
             session_id=None,  # LTM is cross-session
+            user_id=user_id or None,
             limit=6,
         )
         return self.ltm.format_context(entries)
@@ -93,6 +113,7 @@ class BaseAgent:
         session_id: str,
         user_message: str,
         agent_response: str,
+        user_id: str = "",
         extra_meta: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         entries = self.ltm.insert_conversation_turn(
@@ -101,6 +122,7 @@ class BaseAgent:
             user_message=user_message,
             agent_response=agent_response,
             extra_meta=extra_meta,
+            user_id=user_id,
         )
         return [{"id": e.id, "category": e.category.value, "text": e.text[:100]} for e in entries]
 
@@ -125,5 +147,5 @@ class BaseAgent:
 
     # --- Main run ---
 
-    def run(self, user_message: str, session_id: str) -> AgentResult:
+    def run(self, user_message: str, session_id: str, user_id: str = "") -> AgentResult:
         raise NotImplementedError

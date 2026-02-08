@@ -8,6 +8,10 @@ Memory Categories:
   - PROCEDURAL: How-to knowledge, workflows, step sequences, rules
   - EPISODIC: Specific conversation events, user requests, outcomes
   - SEMANTIC: Facts, definitions, entity relationships, domain knowledge
+
+Retrieval Strategy (by category):
+  - SEMANTIC + EPISODIC: filtered by user_id (personal data)
+  - PROCEDURAL: NO user_id filter (universal domain knowledge)
 """
 from __future__ import annotations
 
@@ -32,6 +36,10 @@ class MemoryCategory(str, Enum):
     SEMANTIC = "semantic"
 
 
+# Categories that contain personal/user-specific data → filter by user_id
+_PERSONAL_CATEGORIES = {MemoryCategory.EPISODIC, MemoryCategory.SEMANTIC}
+
+
 @dataclass
 class LTMEntry:
     id: str
@@ -39,6 +47,7 @@ class LTMEntry:
     category: MemoryCategory
     agent: str
     session_id: str
+    user_id: str = ""
     score: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: int = 0
@@ -53,8 +62,8 @@ Kategoriler:
 2. EPISODIC - Belirli bir konuşma olayı, kullanıcının talebi, sonuçlar, deneyimler.
    Örnek: "Kullanıcı 5M TL kredi limiti sordu, DSCR analizi yapıldı, %1.8 çıktı"
 
-3. SEMANTIC - Gerçekler, tanımlar, varlık ilişkileri, alan bilgisi, genel bilgi.
-   Örnek: "KOBİ segmenti için POS komisyon oranı %1.2'dir"
+3. SEMANTIC - Gerçekler, tanımlar, varlık ilişkileri, kişisel bilgiler, alan bilgisi, genel bilgi.
+   Örnek: "Kullanıcının göz rengi mavi" veya "KOBİ segmenti için POS komisyon oranı %1.2'dir"
 
 Sadece şu JSON formatında yanıt ver:
 {"category": "PROCEDURAL|EPISODIC|SEMANTIC", "confidence": 0.0-1.0, "summary": "kısa özet"}
@@ -96,7 +105,6 @@ class LongTermMemory:
                 temperature=0.1,
                 max_tokens=200,
             )
-            # Parse JSON from response
             if "{" in raw:
                 raw = raw[raw.index("{"):raw.rindex("}") + 1]
             parsed = json.loads(raw)
@@ -121,6 +129,8 @@ class LongTermMemory:
             "oran", "komisyon", "limit", "tanım", "nedir", "anlamı",
             "kur", "faiz", "vade", "segment", "kategori", "tür",
             "politika", "mevzuat", "yönetmelik", "kanun",
+            "göz", "renk", "isim", "adım", "yaş", "doğum",
+            "benim", "bana", "benimki",
         ]
 
         proc_score = sum(1 for k in procedural_keywords if k in t)
@@ -128,7 +138,7 @@ class LongTermMemory:
 
         if proc_score > sem_score and proc_score >= 2:
             return MemoryCategory.PROCEDURAL, 0.6, text[:100]
-        elif sem_score > proc_score and sem_score >= 2:
+        elif sem_score > proc_score and sem_score >= 1:
             return MemoryCategory.SEMANTIC, 0.6, text[:100]
         else:
             return MemoryCategory.EPISODIC, 0.5, text[:100]
@@ -140,6 +150,7 @@ class LongTermMemory:
         text: str,
         category: Optional[MemoryCategory] = None,
         metadata: Optional[dict[str, Any]] = None,
+        user_id: str = "",
     ) -> LTMEntry:
         """Insert a memory, auto-categorizing if no category provided."""
         if category is None:
@@ -160,6 +171,7 @@ class LongTermMemory:
             "category": category.value,
             "agent": agent,
             "session_id": session_id,
+            "user_id": user_id,
             "confidence": confidence,
             "ts": ts,
             "meta": metadata or {},
@@ -177,6 +189,7 @@ class LongTermMemory:
             category=category,
             agent=agent,
             session_id=session_id,
+            user_id=user_id,
             score=confidence,
             metadata=metadata or {},
             timestamp=ts,
@@ -189,6 +202,7 @@ class LongTermMemory:
         user_message: str,
         agent_response: str,
         extra_meta: Optional[dict[str, Any]] = None,
+        user_id: str = "",
     ) -> list[LTMEntry]:
         """Insert a full conversation turn - categorizes and stores in appropriate buckets."""
         entries = []
@@ -201,6 +215,7 @@ class LongTermMemory:
             text=episodic_text,
             category=MemoryCategory.EPISODIC,
             metadata={"type": "conversation_turn", **(extra_meta or {})},
+            user_id=user_id,
         )
         entries.append(entry)
 
@@ -214,6 +229,7 @@ class LongTermMemory:
                 text=combined,
                 category=cat,
                 metadata={"type": "auto_categorized", "source_category": cat.value, **(extra_meta or {})},
+                user_id=user_id,
             )
             entries.append(entry2)
 
@@ -225,10 +241,16 @@ class LongTermMemory:
         query: str,
         category: Optional[MemoryCategory] = None,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         limit: int = 5,
         score_threshold: float = 0.15,
     ) -> list[LTMEntry]:
-        """Retrieve memories by similarity. If no category, search all 3."""
+        """Retrieve memories by similarity.
+
+        Smart filtering by category:
+          - SEMANTIC/EPISODIC: filter by user_id (personal data)
+          - PROCEDURAL: NO user_id filter (universal knowledge)
+        """
         categories = [category] if category else list(MemoryCategory)
         all_hits: list[LTMEntry] = []
 
@@ -238,11 +260,19 @@ class LongTermMemory:
             col_name = self._collection_name(agent, cat)
             self._ensure_collection(col_name)
 
-            qfilter = None
+            # Build filter conditions
+            conditions = []
             if session_id:
-                qfilter = qm.Filter(must=[
+                conditions.append(
                     qm.FieldCondition(key="session_id", match=qm.MatchValue(value=session_id))
-                ])
+                )
+            # Smart user_id filtering: only for personal categories
+            if user_id and cat in _PERSONAL_CATEGORIES:
+                conditions.append(
+                    qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id))
+                )
+
+            qfilter = qm.Filter(must=conditions) if conditions else None
 
             try:
                 res = self.client.search(
@@ -264,6 +294,7 @@ class LongTermMemory:
                     category=cat,
                     agent=payload.get("agent", agent),
                     session_id=payload.get("session_id", ""),
+                    user_id=payload.get("user_id", ""),
                     score=float(r.score),
                     metadata=dict(payload.get("meta", {})),
                     timestamp=payload.get("ts", 0),
@@ -277,9 +308,10 @@ class LongTermMemory:
         agent: str,
         query: str,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         limit_per_category: int = 3,
     ) -> dict[str, list[LTMEntry]]:
-        """Retrieve memories grouped by category."""
+        """Retrieve memories grouped by category with smart user_id filtering."""
         result = {}
         for cat in MemoryCategory:
             hits = self.retrieve(
@@ -287,6 +319,7 @@ class LongTermMemory:
                 query=query,
                 category=cat,
                 session_id=session_id,
+                user_id=user_id,
                 limit=limit_per_category,
             )
             result[cat.value] = hits
@@ -296,17 +329,26 @@ class LongTermMemory:
         self,
         agent: str,
         limit_per_category: int = 20,
+        user_id: Optional[str] = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """List all recent memories for an agent grouped by category."""
         result = {}
         for cat in MemoryCategory:
             col_name = self._collection_name(agent, cat)
             self._ensure_collection(col_name)
+
+            scroll_filter = None
+            if user_id and cat in _PERSONAL_CATEGORIES:
+                scroll_filter = qm.Filter(must=[
+                    qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id))
+                ])
+
             try:
                 points, _ = self.client.scroll(
                     collection_name=col_name,
                     limit=limit_per_category,
                     with_payload=True,
+                    scroll_filter=scroll_filter,
                 )
                 items = []
                 for p in points:
@@ -316,7 +358,9 @@ class LongTermMemory:
                         "text": payload.get("text", ""),
                         "summary": payload.get("summary", ""),
                         "category": cat.value,
+                        "agent": payload.get("agent", agent),
                         "session_id": payload.get("session_id", ""),
+                        "user_id": payload.get("user_id", ""),
                         "ts": payload.get("ts", 0),
                         "meta": payload.get("meta", {}),
                     })
@@ -338,9 +382,9 @@ class LongTermMemory:
         lines = ["=== Uzun Süreli Hafıza (Long-Term Memory) ==="]
 
         cat_labels = {
-            "procedural": "📋 Prosedürel (Nasıl Yapılır)",
-            "episodic": "📖 Episodik (Geçmiş Olaylar)",
-            "semantic": "🧠 Semantik (Bilgi/Gerçekler)",
+            "procedural": "Prosedürel (Nasıl Yapılır)",
+            "episodic": "Episodik (Geçmiş Olaylar)",
+            "semantic": "Semantik (Bilgi/Gerçekler)",
         }
 
         for cat_val, cat_entries in grouped.items():
