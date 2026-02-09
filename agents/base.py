@@ -71,9 +71,7 @@ class BaseAgent:
         self, session_id: str, text: str, user_id: str = "",
         meta: dict[str, Any] | None = None,
     ):
-        base = {"session_id": session_id, **(meta or {})}
-        if user_id:
-            base["user_id"] = user_id
+        base = {"session_id": session_id, "user_id": user_id, **(meta or {})}
         self.memory.upsert_text(self.memory_collection, text=text, meta=base)
 
     def write_structured_fact(
@@ -83,12 +81,11 @@ class BaseAgent:
         text = "FACT_JSON: " + json.dumps(fact, ensure_ascii=False)
         base = {
             "session_id": session_id,
+            "user_id": user_id,
             "type": "fact_structured",
             "fact": fact,
             **(meta or {}),
         }
-        if user_id:
-            base["user_id"] = user_id
         self.memory.upsert_text(self.memory_collection, text=text, meta=base)
 
     # --- Long-term memory ---
